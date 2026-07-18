@@ -99,7 +99,10 @@ an engine can light a prop's sunlit top brightly and darken its shadowed undersi
   every matched prop each IQM vertex is transformed to world space (same `origin`/`angles`/`scale` placement
   math as the occluders) and the lighting there is sampled with `FixPointAndCalcLightgrid` (which nudges
   vertices that sit just inside a surface back onto it). The omnidirectional result is stored as an absolute
-  0–255 RGB in global IQM vertex order.
+  0–255 RGB in global IQM vertex order. The per-vertex sampling is **multithreaded** (`logging::parallel_for`,
+  like the lightgrid pass) with a `PropVertexLighting` progress bar — a full per-point light calc over every
+  prop vertex is not cheap on sun-heavy maps (≈50 s for ~300k verts with 66 suns + bounce), so it shows an ETA
+  instead of appearing to hang. Drop `-propvertexlight` for fast iteration compiles.
 - **`RGBPROPLIGHT` lump format** (little-endian): `uint32 version(=1)`, `uint32 record_count`, then per record
   `float origin[3]`, `float angles[3]`, `uint16 namelen`, `char name[namelen]` (the entity `model`),
   `uint32 vertexcount`, `uint8 rgb[vertexcount][3]`. One record per placement (no dedup — each instance is

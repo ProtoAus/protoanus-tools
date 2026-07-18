@@ -22,6 +22,7 @@
 #include <common/fs.hh>
 #include <common/log.hh>
 #include <common/mathlib.hh>
+#include <common/parallel.hh>
 #include <common/qvec.hh>
 
 #include <array>
@@ -292,7 +293,11 @@ void GatherPropVertexLights(const mbsp_t *bsp, std::vector<proplight_record_t> &
     if (!GetEntdicts().empty() && GetEntdicts().at(0).get("classname") == "worldspawn")
         AddClasses(GetEntdicts().at(0).get("_propshadowclasses"), castset);
 
-    size_t nprop = 0, nvtx = 0;
+    // Pass 1 (serial, cheap): load each matching IQM prop, transform its vertices to world space and
+    // size its colour array. Building every record up-front lets the expensive per-vertex lighting
+    // sample below run in parallel with no push_back racing.
+    std::vector<qvec3f> worldverts;                  // all records' vertices, concatenated
+    std::vector<std::pair<uint32_t, uint32_t>> vidx; // (record index, local vertex index) per worldvert
 
     for (const entdict_t &ent : GetEntdicts()) {
         if (castset.find(ent.get("classname")) == castset.end())
@@ -340,26 +345,37 @@ void GatherPropVertexLights(const mbsp_t *bsp, std::vector<proplight_record_t> &
         rec.origin = origin_f;
         rec.angles = angles_f;
         rec.model = model;
-        rec.vertexcolors.reserve(verts.size());
+        rec.vertexcolors.resize(verts.size());
 
-        for (const qvec3f &v : verts) {
-            qvec3d w = qvec3d(v) * scale; // scale
-            w = rotation * w; // rotate
-            w = w + origin; // translate to world
-            const lightgrid_samples_t s = FixPointAndCalcLightgrid(bsp, qvec3f(w));
-            if (s.occluded) // buried vertex the fixup couldn't rescue: neutral, normalizes near 1.0
-                rec.vertexcolors.push_back(qvec3b{128, 128, 128});
-            else
-                rec.vertexcolors.push_back(round_to_int(s.samples_by_style[0].undirectional_color));
+        const uint32_t ri = (uint32_t)out.size();
+        for (uint32_t k = 0; k < verts.size(); k++) {
+            qvec3d w = qvec3d(verts[k]) * scale; // scale
+            w = rotation * w;                    // rotate
+            w = w + origin;                      // translate to world
+            worldverts.push_back(qvec3f(w));
+            vidx.emplace_back(ri, k);
         }
-
         out.push_back(std::move(rec));
-        nprop++;
-        nvtx += verts.size();
     }
 
-    if (nprop > 0)
-        logging::print("{} prop vertex-light record(s), {} vertices baked for RGBPROPLIGHT\n", nprop, nvtx);
+    if (worldverts.empty())
+        return;
+
+    // Pass 2 (parallel): sample the finished world lighting at every prop vertex. Each iteration writes
+    // a distinct record/vertex slot, so no synchronisation is needed; FixPointAndCalcLightgrid is the
+    // same thread-safe point sampler the -lightgrid pass uses. Serial, this crawls on maps with many
+    // suns/bounce -- i.e. the "compile just stopped after DECOUPLED_LM" hang.
+    logging::header("PropVertexLighting");
+    logging::parallel_for(0, (int)worldverts.size(), [&](int i) {
+        const lightgrid_samples_t s = FixPointAndCalcLightgrid(bsp, worldverts[i]);
+        const qvec3b c = s.occluded // buried vertex the fixup couldn't rescue: neutral, normalizes near 1.0
+                             ? qvec3b{128, 128, 128}
+                             : round_to_int(s.samples_by_style[0].undirectional_color);
+        out[vidx[i].first].vertexcolors[vidx[i].second] = c;
+    });
+
+    logging::print(
+        "{} prop vertex-light record(s), {} vertices baked for RGBPROPLIGHT\n", out.size(), worldverts.size());
 }
 
 } // namespace lightmesh
