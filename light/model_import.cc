@@ -15,6 +15,7 @@
 
 #include <light/model_import.hh>
 #include <light/entities.hh>
+#include <light/light.hh>
 
 #include <common/fs.hh>
 #include <common/log.hh>
@@ -25,6 +26,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -153,13 +155,40 @@ static bool LoadMeshTris(const fs::path &path, std::vector<std::array<qvec3f, 3>
     return LoadObjTris(path, tris);
 }
 
+// Split a "prop_static prop_detail,foo" style list into a set of classnames.
+static void AddClasses(const std::string &s, std::set<std::string> &out)
+{
+    std::string cur;
+    for (char c : s) {
+        if (c == ' ' || c == ',' || c == ';' || c == '\t' || c == '\n' || c == '\r') {
+            if (!cur.empty()) {
+                out.insert(cur);
+                cur.clear();
+            }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty())
+        out.insert(cur);
+}
+
 void GatherMeshOccluders(std::vector<polylib::winding3f_t> &out)
 {
     int nmesh = 0;
     size_t ntris = 0;
 
+    // Classnames that cast baked mesh shadows: the dedicated _light_mesh entity, plus any
+    // configured via -propshadowclasses (or the _propshadowclasses worldspawn key), so a mod's
+    // existing prop_static/prop_detail/... entities cast directly with no per-entity edits.
+    std::set<std::string> castset;
+    castset.insert("_light_mesh");
+    AddClasses(light_options.propshadowclasses.value(), castset);
+    if (!GetEntdicts().empty() && GetEntdicts().at(0).get("classname") == "worldspawn")
+        AddClasses(GetEntdicts().at(0).get("_propshadowclasses"), castset);
+
     for (const entdict_t &ent : GetEntdicts()) {
-        if (ent.get("classname") != "_light_mesh")
+        if (castset.find(ent.get("classname")) == castset.end())
             continue;
 
         const std::string model = ent.get("model");

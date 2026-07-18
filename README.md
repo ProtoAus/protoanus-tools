@@ -19,9 +19,11 @@ Repo: <https://github.com/ProtoAus/protoanus-tools>
 - **`light -denoise` — OIDN lightmap denoising.** An optional Intel Open Image Denoise pass over the baked
   lightmap, so far fewer samples give clean GI / AO / soft shadows (no denoiser exists upstream). Optional
   dependency: if OIDN isn't found at build time, `-denoise` is a graceful no-op. See `CHANGES.md`.
-- **External mesh occluders — `_light_mesh` (Source `-StaticPropPolys`).** A `_light_mesh` point entity
-  loads a real prop mesh (`.obj` / `.iqm`) and casts an accurate mesh-shaped shadow, instead of a
-  collision-hull/brush-proxy approximation. No new dependency (minimal in-repo loaders). See `CHANGES.md`.
+- **External mesh occluders (Source `-StaticPropPolys`).** `light` casts accurate mesh-shaped shadows from
+  real prop meshes (`.obj` / `.iqm`) instead of collision-hull/brush-proxy approximations. Point it at your
+  existing props with `-propshadowclasses "prop_static prop_detail ..."` (reads each entity's
+  model/origin/angles/scale — no map edits), or place a one-off `_light_mesh` entity. No new dependency
+  (minimal in-repo loaders). See `CHANGES.md`.
 
 **Roadmap** (planned; see `CHANGES.md` for design + status)
 - **Static-prop per-vertex lighting** (Source `-StaticPropLighting` analogue) — bake lighting onto placed

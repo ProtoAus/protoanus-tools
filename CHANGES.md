@@ -61,10 +61,17 @@ downsample), so low sample counts come out clean.
 props throw **accurate mesh-shaped shadows** instead of collision-hull/brush-proxy approximations. Upstream
 could only import `.map` *brush* prefabs (`misc_external_map`); there was no mesh path at all.
 
-- **Usage:** place a point entity `_light_mesh` with `"model"` (a `.obj` or `.iqm` path, resolved through the
-  compiler's file search / `-path`), `"origin"`, `"angles"` (pitch yaw roll, same convention as
-  `misc_external_map`), and optional `"_scale"`. Its mesh becomes an opaque shadow caster. (Typically placed
-  alongside the engine's own render prop, like Source's `prop_static` + VRAD.)
+- **Usage — existing props (recommended for many props):** add `-propshadowclasses "prop_static prop_detail
+  ..."` to the `light` command (or set the `_propshadowclasses` worldspawn key). `light` then reads every
+  entity of those classnames and casts its `model` as a shadow, using the entity's own `model`/`origin`/
+  `angles`/`scale` keys — **no new entities and no per-prop edits**. (Verified: notnormals' 246 `prop_static`/
+  detail/dynamic entities → 217 382 triangles of real prop mesh cast into the lightmap.)
+- **Usage — one-offs:** a dedicated `_light_mesh` point entity (keys `model`, `origin`, `angles` = pitch yaw
+  roll like `misc_external_map`, optional `_scale`) always casts, regardless of `-propshadowclasses`.
+- Model paths (`.obj`/`.iqm`) resolve through the compiler's file search (`-path`).
+- **Alignment caveat:** rotation uses the standard `angles` (pitch yaw roll) convention; engines that render
+  meshes with a flipped pitch (e.g. FTE `r_meshpitch -1`) may see pitched/rolled props' shadows misaligned.
+  Yaw-only props are unaffected.
 - **Loaders:** minimal in-repo readers, no new dependency — Wavefront **`.obj`** (positions + faces,
   fan-triangulated) and **IQM v2** (`INTERQUAKEMODEL`, base-frame `IQM_POSITION` float3 verts + triangle
   list). Dispatched by extension.

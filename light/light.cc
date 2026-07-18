@@ -390,6 +390,10 @@ light_settings::light_settings()
           "lightgrid BSPX lump to use"},
       denoise{this, "denoise", false, &experimental_group,
           "denoise the lightmap with Intel Open Image Denoise (requires an OIDN-enabled build)"},
+      propshadowclasses{this, "propshadowclasses", "", "\"classnames\"", &experimental_group,
+          "space/comma-separated entity classnames whose entities cast baked MESH shadows, read from "
+          "each entity's model/origin/angles/scale keys (e.g. \"prop_static prop_detail\"). The dedicated "
+          "_light_mesh entity always works regardless. Also settable via the _propshadowclasses worldspawn key."},
 
       dirtdebug{this, {"dirtdebug", "debugdirt"},
           [&](const std::string &, parser_base_t &, source) {

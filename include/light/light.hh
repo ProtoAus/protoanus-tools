@@ -426,6 +426,7 @@ public:
     setting_vec3 lightgrid_dist;
     setting_enum<lightgrid_format_t> lightgrid_format;
     setting_bool denoise;
+    setting_string propshadowclasses;
 
     setting_func dirtdebug;
     setting_func bouncedebug;
