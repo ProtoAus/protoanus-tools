@@ -1,0 +1,186 @@
+option(SKIP_TBB_INSTALL "Skip TBB Library Installation" OFF)
+option(SKIP_EMBREE_INSTALL "Skip Embree Library Installation" OFF)
+
+set(LIGHT_INCLUDES
+	../include/light/entities.hh
+	../include/light/light.hh
+	../include/light/lightgrid.hh
+	../include/light/phong.hh
+	../include/light/bounce.hh
+	../include/light/surflight.hh
+	../include/light/ltface.hh
+	../include/light/trace.hh
+	../include/light/write.hh
+	../include/light/spatialindex.hh
+	../include/light/denoise.hh
+	../include/light/model_import.hh
+)
+
+set(LIGHT_SOURCES
+	entities.cc
+	ltface.cc
+	trace.cc
+	light.cc
+	lightgrid.cc
+	phong.cc
+	bounce.cc
+	surflight.cc
+	write.cc
+	spatialindex.cc
+	denoise.cc
+	model_import.cc
+	${LIGHT_INCLUDES}
+)
+
+if (embree_FOUND)
+	MESSAGE(STATUS "Embree library found: ${EMBREE_LIBRARY}")
+	INCLUDE_DIRECTORIES(${EMBREE_INCLUDE_DIRS})
+	set(LIGHT_INCLUDES
+		../include/light/trace_embree.hh
+		${LIGHT_INCLUDES})
+	set(LIGHT_SOURCES
+		trace_embree.cc
+		../include/light/trace_embree.hh
+		${LIGHT_SOURCES})
+
+	# This needs to be before the add_executable
+	if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+		SET(CMAKE_INSTALL_RPATH "$ORIGIN")
+	endif ()
+endif(embree_FOUND)
+
+add_library(liblight STATIC ${LIGHT_SOURCES})
+
+target_link_libraries(liblight PRIVATE common ${CMAKE_THREAD_LIBS_INIT} fmt::fmt jsoncpp_static)
+
+add_executable(light main.cc)
+target_link_libraries(light PRIVATE common liblight)
+
+if (embree_FOUND)
+	target_link_libraries (liblight PRIVATE embree)
+	add_definitions(-DHAVE_EMBREE)
+
+	# macOS/homebrew: hack around find_file applying the .. before resolving the symlink
+	# causing it not to find the LICENSE.txt
+	get_filename_component(embree_DIR_ABS "${embree_DIR}" REALPATH CACHE)
+
+	find_file(EMBREE_LICENSE LICENSE.txt
+		"${embree_DIR_ABS}/doc"
+		"${embree_DIR_ABS}/../../../doc"
+		"${embree_DIR_ABS}/../embree3/embree3" # vcpkg puts it here
+		"${embree_DIR_ABS}/../../.." # homebrew puts it here
+		NO_DEFAULT_PATH)
+	if (EMBREE_LICENSE STREQUAL EMBREE_LICENSE-NOTFOUND)
+		message(WARNING "Couldn't find embree license. embree_DIR: ${embree_DIR}, embree_DIR_ABS: ${embree_DIR_ABS}")
+	else()
+		message(STATUS "Found embree license: ${EMBREE_LICENSE}")
+	endif()
+
+	# HACK: Windows embree .dll's from https://github.com/embree/embree/releases ship with a tbb12.dll
+	# and we need to copy it from the embree/bin directory to our light.exe/testlight.exe dir in order for them to run
+	find_file(EMBREE_TBB_DLL tbb12.dll
+              "${EMBREE_ROOT_DIR}/bin"
+              NO_DEFAULT_PATH)
+	if (NOT EMBREE_TBB_DLL STREQUAL EMBREE_TBB_DLL-NOTFOUND)
+		message(STATUS "Found embree EMBREE_TBB_DLL: ${EMBREE_TBB_DLL}")
+	endif()
+
+	add_custom_command(TARGET light POST_BUILD
+                       COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:embree>"   "$<TARGET_FILE_DIR:light>"
+                       COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:TBB::tbb>" "$<TARGET_FILE_DIR:light>"
+					   COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:TBB::tbbmalloc>" "$<TARGET_FILE_DIR:light>"
+					   )
+
+	if (NOT EMBREE_LICENSE STREQUAL EMBREE_LICENSE-NOTFOUND)
+		add_custom_command(TARGET light POST_BUILD
+                       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${EMBREE_LICENSE}"       "$<TARGET_FILE_DIR:light>/LICENSE-embree.txt")
+	endif()
+	if (NOT EMBREE_TBB_DLL STREQUAL EMBREE_TBB_DLL-NOTFOUND)
+		add_custom_command(TARGET light POST_BUILD
+				           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${EMBREE_TBB_DLL}" "$<TARGET_FILE_DIR:light>")
+	endif()
+
+	if(NOT SKIP_EMBREE_INSTALL)
+		install(FILES $<TARGET_FILE:embree> DESTINATION .)
+	endif()
+
+	# install TBB
+	if(SKIP_TBB_INSTALL)
+		message(STATUS "Skipping TBB Install")
+	elseif(UNIX)
+		# HACK: manually follow symlinks to ensure the underlying .so files
+		# get installed, not symlinks. The "preferred method" below is installing the symlink,
+		# which produces unusable release archives.
+		get_target_property(TBB_SO_FILE_SYMLINK TBB::tbb IMPORTED_LOCATION_RELEASE)
+		message(STATUS "TBB .so symlink: ${TBB_SO_FILE_SYMLINK}")
+
+		# just the name part of the symlink
+		get_filename_component(TBB_SO_FILE_SYMLINK_NAME "${TBB_SO_FILE_SYMLINK}" NAME)
+		message(STATUS "TBB .so symlink name: ${TBB_SO_FILE_SYMLINK_NAME}")
+
+		get_filename_component(TBB_SO_FILE "${TBB_SO_FILE_SYMLINK}" REALPATH)
+		message(STATUS "TBB .so file: ${TBB_SO_FILE}")
+
+		install(FILES ${TBB_SO_FILE} DESTINATION . RENAME "${TBB_SO_FILE_SYMLINK_NAME}")
+
+		# tbbmalloc
+		get_target_property(TBBMALLOC_SO_FILE_SYMLINK TBB::tbbmalloc IMPORTED_LOCATION_RELEASE)
+		message(STATUS "TBBMALLOC .so symlink: ${TBBMALLOC_SO_FILE_SYMLINK}")
+
+		get_filename_component(TBBMALLOC_SO_FILE_SYMLINK_NAME "${TBBMALLOC_SO_FILE_SYMLINK}" NAME)
+		message(STATUS "TBBMALLOC .so symlink name: ${TBBMALLOC_SO_FILE_SYMLINK_NAME}")
+
+		get_filename_component(TBBMALLOC_SO_FILE "${TBBMALLOC_SO_FILE_SYMLINK}" REALPATH)
+
+		message(STATUS "TBBMALLOC .so file: ${TBBMALLOC_SO_FILE}")
+
+		install(FILES ${TBBMALLOC_SO_FILE} DESTINATION . RENAME "${TBBMALLOC_SO_FILE_SYMLINK_NAME}")
+	else()
+		# preferred method
+		install(FILES $<TARGET_FILE:TBB::tbb> DESTINATION .)
+		install(FILES $<TARGET_FILE:TBB::tbbmalloc> DESTINATION .)
+	endif()
+
+	if((NOT SKIP_EMBREE_INSTALL) AND (NOT EMBREE_LICENSE STREQUAL EMBREE_LICENSE-NOTFOUND))
+		install(FILES ${EMBREE_LICENSE} DESTINATION . RENAME LICENSE-embree.txt)
+	endif()
+endif(embree_FOUND)
+
+# protoanus-tools: optional Intel Open Image Denoise for the -denoise lightmap pass.
+# Auto-disabled (no-op) if OIDN isn't found, so the build never breaks on its absence.
+find_package(OpenImageDenoise 2 QUIET)
+if (OpenImageDenoise_FOUND)
+	message(STATUS "OpenImageDenoise found: enabling -denoise")
+	target_link_libraries(liblight PRIVATE OpenImageDenoise)
+	target_compile_definitions(liblight PRIVATE HAVE_OIDN)
+
+	# Ship OIDN's runtime next to light.exe. OIDN 2.x loads its device module dynamically
+	# by looking, next to the loaded core lib, for an UN-prefixed name
+	# ("OpenImageDenoise_device_cpu.dll"). MSYS2/mingw builds it as
+	# "libOpenImageDenoise_device_cpu.dll", so the module is never found unless we copy it
+	# WITHOUT the lib prefix. Derive the runtime dir from the package's cmake config dir.
+	get_filename_component(OIDN_ROOT "${OpenImageDenoise_DIR}/../../.." ABSOLUTE)
+	set(OIDN_BIN_DIR "${OIDN_ROOT}/bin")
+	# main + core dlls: copy verbatim
+	file(GLOB OIDN_MAIN_DLLS "${OIDN_BIN_DIR}/*OpenImageDenoise.dll" "${OIDN_BIN_DIR}/*OpenImageDenoise_core.dll")
+	foreach(_dll ${OIDN_MAIN_DLLS})
+		add_custom_command(TARGET light POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "$<TARGET_FILE_DIR:light>")
+	endforeach()
+	# device modules: copy with any leading "lib" stripped so OIDN can find them
+	file(GLOB OIDN_DEVICE_DLLS "${OIDN_BIN_DIR}/*OpenImageDenoise_device_*.dll")
+	foreach(_dll ${OIDN_DEVICE_DLLS})
+		get_filename_component(_name "${_dll}" NAME)
+		string(REGEX REPLACE "^lib" "" _name "${_name}")
+		add_custom_command(TARGET light POST_BUILD
+			COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "$<TARGET_FILE_DIR:light>/${_name}")
+	endforeach()
+else()
+	message(STATUS "OpenImageDenoise NOT found: -denoise will be a no-op")
+endif()
+
+copy_mingw_dlls(light)
+add_loader_path_to_rpath(light)
+
+install(TARGETS light RUNTIME DESTINATION .)
+install(FILES ../gpl_v3.txt DESTINATION .)
