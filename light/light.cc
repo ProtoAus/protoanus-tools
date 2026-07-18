@@ -31,6 +31,7 @@
 #include <light/ltface.hh>
 #include <light/write.hh> // for facesup_t
 #include <light/trace_embree.hh>
+#include <light/model_import.hh> // for GatherPropVertexLights (RGBPROPLIGHT bake)
 
 #include <common/log.hh>
 #include <common/bsputils.hh>
@@ -394,6 +395,10 @@ light_settings::light_settings()
           "space/comma-separated entity classnames whose entities cast baked MESH shadows, read from "
           "each entity's model/origin/angles/scale keys (e.g. \"prop_static prop_detail\"). The dedicated "
           "_light_mesh entity always works regardless. Also settable via the _propshadowclasses worldspawn key."},
+      propvertexlight{this, "propvertexlight", false, &experimental_group,
+          "bake per-vertex omnidirectional lighting for placed IQM prop meshes (one record per placement) "
+          "into the RGBPROPLIGHT BSPX lump, so an engine can light a prop's sunlit top and shadowed underside "
+          "differently. Uses the same classnames as -propshadowclasses (plus the _light_mesh entity)."},
 
       dirtdebug{this, {"dirtdebug", "debugdirt"},
           [&](const std::string &, parser_base_t &, source) {
@@ -1212,6 +1217,55 @@ static inline void WriteNormals(const mbsp_t &bsp, bspdata_t &bspdata)
     bspdata.bspx.transfer("FACENORMALS", data);
 }
 
+// protoanus-tools: bake per-vertex prop lighting into the RGBPROPLIGHT BSPX lump.
+// One little-endian record per matched IQM prop placement:
+//   float origin[3]; float angles[3]; uint16 namelen; char name[namelen];
+//   uint32 vertexcount; uint8 rgb[vertexcount][3]   (absolute light, global IQM vertex order)
+// preceded by a header: uint32 version(=1); uint32 record_count.
+static inline void WritePropVertexLights(const mbsp_t &bsp, bspdata_t &bspdata)
+{
+    std::vector<lightmesh::proplight_record_t> records;
+    lightmesh::GatherPropVertexLights(&bsp, records);
+    if (records.empty())
+        return;
+
+    size_t data_size = sizeof(uint32_t) * 2; // version + record_count
+    for (auto &r : records)
+        data_size += sizeof(float) * 6 + sizeof(uint16_t) + r.model.size() + sizeof(uint32_t) +
+                     (r.vertexcolors.size() * 3);
+
+    std::vector<uint8_t> data(data_size);
+    omemstream stream(data.data(), data_size);
+
+    stream << endianness<std::endian::little>;
+    stream <= uint32_t{1}; // version
+    stream <= numeric_cast<uint32_t>(records.size());
+
+    for (auto &r : records) {
+        stream <= r.origin[0];
+        stream <= r.origin[1];
+        stream <= r.origin[2];
+        stream <= r.angles[0];
+        stream <= r.angles[1];
+        stream <= r.angles[2];
+        stream <= numeric_cast<uint16_t>(r.model.size());
+        for (char c : r.model)
+            stream <= c;
+        stream <= numeric_cast<uint32_t>(r.vertexcolors.size());
+        for (auto &c : r.vertexcolors) {
+            stream <= c[0];
+            stream <= c[1];
+            stream <= c[2];
+        }
+    }
+
+    Q_assert(stream.tellp() == data_size);
+
+    logging::print("wrote RGBPROPLIGHT: {} prop record(s), {} bytes\n", records.size(), data_size);
+
+    bspdata.bspx.transfer("RGBPROPLIGHT", data);
+}
+
 /**
  * Resets globals in this file
  */
@@ -1366,6 +1420,12 @@ int light_main(int argc, const char **argv)
         LightWorld(&bspdata, source, light_options.lightmap_scale.is_changed());
 
         LightGrid(&bspdata);
+
+        // protoanus-tools: bake per-vertex prop lighting while the lightgrid sampler is live
+        // (before ClearLightmapSurfaces), sampling the finished direct+bounce world lighting.
+        if (light_options.propvertexlight.value()) {
+            WritePropVertexLights(bsp, bspdata);
+        }
 
         ClearLightmapSurfaces();
 

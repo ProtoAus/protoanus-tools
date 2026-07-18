@@ -16,6 +16,8 @@
 #include <light/model_import.hh>
 #include <light/entities.hh>
 #include <light/light.hh>
+#include <light/lightgrid.hh>
+#include <light/ltface.hh>
 
 #include <common/fs.hh>
 #include <common/log.hh>
@@ -144,6 +146,46 @@ static bool LoadIqmTris(const fs::path &path, std::vector<std::array<qvec3f, 3>>
     return !tris.empty();
 }
 
+// Minimal IQM (v2) ORDERED vertex reader: the base-frame IQM_POSITION float3 array in its
+// global vertex order (index i == FTE's opos[i]), so an engine can map one baked color per
+// vertex straight back by index. Used by the static-prop vertex-lighting bake (below).
+static bool LoadIqmVerts(const fs::path &path, std::vector<qvec3f> &verts)
+{
+    fs::data d = fs::load(path);
+    if (!d || d->size() < 124)
+        return false;
+    const uint8_t *p = d->data();
+    const size_t n = d->size();
+    if (std::memcmp(p, "INTERQUAKEMODEL\0", 16) != 0)
+        return false;
+    if (rd_u32(p, 16) != 2) // version
+        return false;
+
+    const uint32_t num_va = rd_u32(p, 44), num_vtx = rd_u32(p, 48), ofs_va = rd_u32(p, 52);
+
+    size_t pos_ofs = 0;
+    bool have_pos = false;
+    for (uint32_t i = 0; i < num_va; i++) {
+        const size_t b = (size_t)ofs_va + (size_t)i * 20;
+        if (b + 20 > n)
+            break;
+        if (rd_u32(p, b) == 0 && rd_u32(p, b + 8) == 7 && rd_u32(p, b + 12) == 3) {
+            pos_ofs = rd_u32(p, b + 16);
+            have_pos = true;
+            break;
+        }
+    }
+    if (!have_pos || pos_ofs + (size_t)num_vtx * 12 > n)
+        return false;
+
+    verts.reserve(num_vtx);
+    for (uint32_t i = 0; i < num_vtx; i++) {
+        const size_t o = pos_ofs + (size_t)i * 12;
+        verts.push_back(qvec3f(rd_f32(p, o), rd_f32(p, o + 4), rd_f32(p, o + 8)));
+    }
+    return !verts.empty();
+}
+
 // Load a prop mesh, dispatching on file extension (.iqm -> IQM, else Wavefront .obj).
 static bool LoadMeshTris(const fs::path &path, std::vector<std::array<qvec3f, 3>> &tris)
 {
@@ -237,6 +279,87 @@ void GatherMeshOccluders(std::vector<polylib::winding3f_t> &out)
 
     if (nmesh > 0)
         logging::print("{} _light_mesh occluder(s), {} triangles added to the shadow scene\n", nmesh, ntris);
+}
+
+void GatherPropVertexLights(const mbsp_t *bsp, std::vector<proplight_record_t> &out)
+{
+    // Same classname set as the mesh-shadow occluders, so baked shadows and baked vertex
+    // lighting agree: the dedicated _light_mesh entity, plus -propshadowclasses / the
+    // _propshadowclasses worldspawn key.
+    std::set<std::string> castset;
+    castset.insert("_light_mesh");
+    AddClasses(light_options.propshadowclasses.value(), castset);
+    if (!GetEntdicts().empty() && GetEntdicts().at(0).get("classname") == "worldspawn")
+        AddClasses(GetEntdicts().at(0).get("_propshadowclasses"), castset);
+
+    size_t nprop = 0, nvtx = 0;
+
+    for (const entdict_t &ent : GetEntdicts()) {
+        if (castset.find(ent.get("classname")) == castset.end())
+            continue;
+
+        const std::string model = ent.get("model");
+        if (model.empty())
+            continue;
+
+        // Per-vertex lighting is IQM-only: FTE renders IQM in-engine and applies the colors
+        // by vertex index. (.obj props remain shadow-only via GatherMeshOccluders.)
+        std::string ext = fs::path(model).extension().string();
+        for (char &c : ext)
+            c = (char)std::tolower((unsigned char)c);
+        if (ext != ".iqm")
+            continue;
+
+        std::vector<qvec3f> verts;
+        if (!LoadIqmVerts(model, verts)) {
+            logging::print("WARNING: propvertexlight: could not load IQM vertices '{}'\n", model);
+            continue;
+        }
+
+        qvec3f origin_f{};
+        ent.get_vector("origin", origin_f);
+        qvec3f angles_f{};
+        ent.get_vector("angles", angles_f);
+        const qvec3d origin = qvec3d(origin_f);
+
+        double scale = 1.0;
+        if (!ent.get("_scale").empty())
+            scale = std::atof(ent.get("_scale").c_str());
+        else if (!ent.get("scale").empty())
+            scale = std::atof(ent.get("scale").c_str());
+        if (scale == 0.0)
+            scale = 1.0;
+
+        // Same placement convention as _light_mesh / qbsp's misc_external_map: angles = (pitch, yaw, roll).
+        const double pitch = DEG2RAD(angles_f[0]);
+        const double yaw = DEG2RAD(angles_f[1]);
+        const double roll = DEG2RAD(angles_f[2]);
+        const qmat3x3d rotation = RotateAboutZ(yaw) * RotateAboutY(pitch) * RotateAboutX(roll);
+
+        proplight_record_t rec;
+        rec.origin = origin_f;
+        rec.angles = angles_f;
+        rec.model = model;
+        rec.vertexcolors.reserve(verts.size());
+
+        for (const qvec3f &v : verts) {
+            qvec3d w = qvec3d(v) * scale; // scale
+            w = rotation * w; // rotate
+            w = w + origin; // translate to world
+            const lightgrid_samples_t s = FixPointAndCalcLightgrid(bsp, qvec3f(w));
+            if (s.occluded) // buried vertex the fixup couldn't rescue: neutral, normalizes near 1.0
+                rec.vertexcolors.push_back(qvec3b{128, 128, 128});
+            else
+                rec.vertexcolors.push_back(round_to_int(s.samples_by_style[0].undirectional_color));
+        }
+
+        out.push_back(std::move(rec));
+        nprop++;
+        nvtx += verts.size();
+    }
+
+    if (nprop > 0)
+        logging::print("{} prop vertex-light record(s), {} vertices baked for RGBPROPLIGHT\n", nprop, nvtx);
 }
 
 } // namespace lightmesh

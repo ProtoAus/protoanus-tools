@@ -427,6 +427,7 @@ public:
     setting_enum<lightgrid_format_t> lightgrid_format;
     setting_bool denoise;
     setting_string propshadowclasses;
+    setting_bool propvertexlight;
 
     setting_func dirtdebug;
     setting_func bouncedebug;

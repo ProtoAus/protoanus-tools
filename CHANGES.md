@@ -86,6 +86,39 @@ could only import `.map` *brush* prefabs (`misc_external_map`); there was no mes
   geometry with per-triangle texture/alpha info (like Q1 `{`-textures), rather than as an unconditional
   occluder; and a `.md3` loader.
 
+### feat: static-prop per-vertex lighting — `-propvertexlight` (Source `-StaticPropLighting` analogue)
+
+Bakes the finished world lighting **at each vertex** of every placed IQM prop and writes it, **per placement**,
+to a new `RGBPROPLIGHT` BSPX lump. This fixes the classic "the whole prop reads one dark floor sample" look:
+an engine can light a prop's sunlit top brightly and darken its shadowed underside, per instance.
+
+- **Usage:** add `-propvertexlight` to the `light` command. It reuses the **same classnames** as
+  `-propshadowclasses` (plus the `_light_mesh` entity), so one keyword set drives both baked shadows and baked
+  vertex lighting, and they stay consistent. **IQM only** (the engine applies the colors back by vertex index).
+- **How it works:** after the world lighting + lightgrid are finalised (and before the BSP is written), for
+  every matched prop each IQM vertex is transformed to world space (same `origin`/`angles`/`scale` placement
+  math as the occluders) and the lighting there is sampled with `FixPointAndCalcLightgrid` (which nudges
+  vertices that sit just inside a surface back onto it). The omnidirectional result is stored as an absolute
+  0–255 RGB in global IQM vertex order.
+- **`RGBPROPLIGHT` lump format** (little-endian): `uint32 version(=1)`, `uint32 record_count`, then per record
+  `float origin[3]`, `float angles[3]`, `uint16 namelen`, `char name[namelen]` (the entity `model`),
+  `uint32 vertexcount`, `uint8 rgb[vertexcount][3]`. One record per placement (no dedup — each instance is
+  unique). ~3 bytes/vertex, e.g. 246 props / ~299k verts ≈ 0.9 MB.
+- **Engine side (separate):** the colours are stored **absolute**; a consumer normalises them to a ~1.0-centred
+  multiplier and multiplies over the model's live (PBR) lighting, so per-pixel/normalmap lighting is preserved
+  and only *redistributed* across the mesh. For FTEQW this is IQM vertex colours fed through a `VC` shader
+  permutation (a small engine change, tracked separately).
+- **Files:** `light/model_import.{cc,hh}` (`LoadIqmVerts` + `GatherPropVertexLights`), `light/light.cc`
+  (`WritePropVertexLights` + call site after `LightGrid`), `include/light/light.hh` + `light/light.cc`
+  (the `-propvertexlight` setting).
+- **Verified:** a direct-only bake of nettest `notnormals.bsp` produced `RGBPROPLIGHT` with 246 records /
+  298 683 vertices (912 733 bytes), the lump round-trips byte-exact, per-vertex colours vary (bright tops vs.
+  black undersides), and the existing `DECOUPLED_LM`/lightgrid lumps are untouched.
+- **Alignment caveat:** identical to the occluder feature — the placement rotation uses standard `angles`
+  (pitch,yaw,roll); engines that render meshes with a flipped pitch (FTE `r_meshpitch -1`) may mismatch the
+  *sample positions* of a pitched/rolled prop. Yaw-only props are exact. Colours are always emitted in model
+  vertex order, so the colour↔vertex mapping never depends on the transform.
+
 ---
 
 ## Investigated — no change needed
@@ -102,24 +135,19 @@ faster) already take effect. No fix required.
 
 ## Roadmap (planned — design notes, not yet implemented)
 
-These are the reasons the fork exists; captured here with concrete hooks so implementation is
-paint-by-numbers once a build environment (CMake + Embree 4 + oneTBB, and OIDN for the first item) is set up.
 Every optional dependency should follow upstream's `find_package … if(FOUND) add_definitions(-DHAVE_X)`
 pattern (see `light/CMakeLists.txt`), so a missing dep just disables the feature and never breaks the build.
 
-*(OIDN denoising has moved to the Implemented section above.)*
+*(OIDN denoising, external mesh occluders, and static-prop per-vertex lighting have all moved to the
+Implemented section above.)*
 
-*(External mesh occluders have moved to the Implemented section above.)*
+### 1. Global-atlas OIDN denoise + guide AOVs
 
-### 1. Static-prop per-vertex lighting  (Source `-StaticPropLighting` analogue)
+`-denoise` currently runs OIDN per-face. Packing all face lightmaps into one atlas (reuse
+`common/bspinfo.cc build_lightmap_atlas`) and denoising once would give better small-face quality and let
+albedo (texture-average cache) + normal (deluxe) AOVs guide the filter for sharper edges.
 
-Pairs with #2. After the world bake, sample lighting at each placed prop's mesh vertices and emit
-per-vertex RGB (new BSPX lump or sidecar, documented format) so a prop's sunlit top stays bright while its
-underside darkens — fixing the "whole prop reads one dark floor sample" problem. Engine-side consumption
-(FTEQW: IQM vertex color + `rgbgen exactvertex`) is a separate, documented follow-up.
+### 2. Alpha-tested ("fence") mesh shadows + `.md3`
 
-- **New files:** `light/staticprop_lighting.cc` + a format doc under `docs/`.
-
-**Build status note:** Stages 1–3 above beyond the implemented fix require a working CMake + Embree 4 +
-oneTBB (+ OIDN) toolchain; the git submodules (`fmt`, `jsoncpp`, `pareto`, `nanobench`) must be initialised
-(`git submodule update --init --recursive`) before configuring.
+Foliage/grate occluders need the mesh on the Embree *filter* geometry with per-triangle alpha (like Q1
+`{`-textures) instead of the current unconditional-occluder slot; plus a `.md3` mesh loader.

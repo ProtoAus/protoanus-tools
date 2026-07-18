@@ -24,11 +24,17 @@ Repo: <https://github.com/ProtoAus/protoanus-tools>
   existing props with `-propshadowclasses "prop_static prop_detail ..."` (reads each entity's
   model/origin/angles/scale — no map edits), or place a one-off `_light_mesh` entity. No new dependency
   (minimal in-repo loaders). See `CHANGES.md`.
+- **`light -propvertexlight` — static-prop per-vertex lighting (Source `-StaticPropLighting`).** Bakes the
+  finished world lighting at every vertex of each placed **IQM** prop — one record *per placement* — into a
+  new `RGBPROPLIGHT` BSPX lump, so an engine can light a prop's sunlit top and shadowed underside differently
+  instead of sampling one point for the whole model. Uses the same classnames as `-propshadowclasses`.
+  Engine-side consumption (e.g. FTEQW multiplying it over live PBR lighting) is a separate step. See `CHANGES.md`.
 
 **Roadmap** (planned; see `CHANGES.md` for design + status)
-- **Static-prop per-vertex lighting** (Source `-StaticPropLighting` analogue) — bake lighting onto placed
-  props' vertices so a prop's sunlit top stays bright while its underside darkens, instead of the whole
-  model reading one dark floor sample.
+- **Global-atlas OIDN denoise + albedo/normal AOVs** — denoise the whole lightmap at once (better small-face
+  quality, guide buffers) instead of the current per-face pass.
+- **Alpha-tested ("fence") mesh shadows** — foliage/grate props need the occluder mesh on the *filter*
+  geometry with per-triangle alpha, rather than as an unconditional occluder.
 
 ## Relationship to upstream & license
 
