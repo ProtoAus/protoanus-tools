@@ -26,6 +26,10 @@
 #include <common/parallel.hh>
 #include <common/litfile.hh>
 
+#include <algorithm>
+#include <cmath>
+#include <set>
+
 void WriteLitFile(const mbsp_t *bsp, const std::vector<facesup_t> &facesup, const fs::path &filename, int version,
     const std::vector<uint8_t> &lit_filebase, const std::vector<uint8_t> &lux_filebase,
     const std::vector<uint8_t> &hdr_filebase)
@@ -375,12 +379,9 @@ static void WriteSingleLightmap(const mbsp_t *bsp, const mface_t *face, const li
     // removes all transparent pixels by averaging from adjacent pixels
     fullres = FloodFillTransparent(fullres, oversampled_width, oversampled_height);
 
-    // protoanus-tools: optional Intel Open Image Denoise pass on the (oversampled) float
-    // lightmap, before downsample. Cleans GI / AO / soft-shadow noise so low sample counts
-    // look good. No-op on builds without OIDN or on tiny faces.
-    if (light_options.denoise.value()) {
-        ltdenoise::denoise_image(fullres, oversampled_width, oversampled_height);
-    }
+    // protoanus-tools: -denoise is applied earlier, ONCE, over a whole-lightmap atlas
+    // (DenoiseLightmapAtlas, called from SaveLightmapSurfaces) rather than per-face here -- a
+    // per-face OIDN pass re-exposed each face independently and tiled into a faint grid.
 
     if (light_options.soft.value() > 0) {
         fullres = BoxBlurImage(fullres, oversampled_width, oversampled_height, light_options.soft.value());
@@ -1004,6 +1005,131 @@ void SaveLightmapSurface(const mbsp_t *bsp, mface_t *face, facesup_t *facesup,
     }
 }
 
+// protoanus-tools: whole-lightmap-atlas OIDN denoise. The old per-face pass (removed from
+// WriteSingleLightmap) ran OIDN on each face's tiny buffer in isolation, so OIDN re-estimated a
+// different exposure per face and edge-darkened each one -> a faint world-aligned grid under r_lightmap.
+// Here we pack EVERY face's float lightmap (per lightstyle) into one big atlas with a replicated-border
+// gutter, denoise the whole thing in ONE OIDN call (a single consistent exposure + real cross-face
+// context), then scatter the result back. Runs after FinishLightmapSurface (values are final) and before
+// the byte write, on the same light_surfaces float data WriteSingleLightmap re-reads.
+static void DenoiseLightmapAtlas(const mbsp_t *bsp)
+{
+    if (!light_options.denoise.value() || !ltdenoise::available())
+        return;
+
+    // replicated-border gutter (luxels): gives OIDN edge context and keeps unrelated faces >= 2*gutter
+    // apart so the filter can't bleed light across face boundaries.
+    const int gutter = 4;
+
+    // distinct lightstyles present across all faces
+    std::set<int> styles;
+    for (size_t f = 0; f < bsp->dfaces.size(); f++) {
+        lightsurf_t &surf = LightSurfaces()[f];
+        if (surf.samples.empty())
+            continue;
+        for (lightmap_t &lm : surf.lightmapsByStyle)
+            styles.insert(lm.style);
+    }
+    if (styles.empty())
+        return;
+
+    logging::header("DenoiseLightmapAtlas");
+
+    struct entry_t
+    {
+        lightsurf_t *surf;
+        lightmap_t *lm;
+        int w, h, x, y;
+    };
+    size_t total_faces = 0;
+
+    for (int style : styles) {
+        std::vector<entry_t> entries;
+        for (size_t f = 0; f < bsp->dfaces.size(); f++) {
+            lightsurf_t &surf = LightSurfaces()[f];
+            if (surf.samples.empty() || surf.width < 1 || surf.height < 1)
+                continue;
+            for (lightmap_t &lm : surf.lightmapsByStyle) {
+                if (lm.style == style)
+                    entries.push_back({&surf, &lm, surf.width, surf.height, 0, 0});
+            }
+        }
+        if (entries.empty())
+            continue;
+
+        // height-sorted shelf pack into one atlas; each rect is padded by `gutter` on all sides
+        std::sort(entries.begin(), entries.end(), [](const entry_t &a, const entry_t &b) { return a.h > b.h; });
+
+        size_t padded_area = 0;
+        for (const entry_t &e : entries)
+            padded_area += (size_t)(e.w + 2 * gutter) * (size_t)(e.h + 2 * gutter);
+        int target_w = (int)std::ceil(std::sqrt((double)padded_area) * 1.05);
+        target_w = std::clamp(target_w, 64, 8192);
+
+        int cx = 0, cy = 0, shelf_h = 0, atlas_w = 0, atlas_h = 0;
+        for (entry_t &e : entries) {
+            const int bw = e.w + 2 * gutter, bh = e.h + 2 * gutter;
+            if (cx > 0 && cx + bw > target_w) {
+                cx = 0;
+                cy += shelf_h;
+                shelf_h = 0;
+            }
+            e.x = cx + gutter; // interior origin in the atlas
+            e.y = cy + gutter;
+            cx += bw;
+            shelf_h = std::max(shelf_h, bh);
+            atlas_w = std::max(atlas_w, cx);
+            atlas_h = std::max(atlas_h, cy + shelf_h);
+        }
+        if (atlas_w < 1 || atlas_h < 1)
+            continue;
+
+        std::vector<qvec4f> atlas((size_t)atlas_w * (size_t)atlas_h, qvec4f(0.0f, 0.0f, 0.0f, 1.0f));
+
+        // fill: flood-filled interior + replicated-border gutter for every face
+        for (const entry_t &e : entries) {
+            std::vector<qvec4f> face = LightmapColorsToGLMVector(e.surf, e.lm);
+            face = FloodFillTransparent(face, e.w, e.h);
+            for (int t = -gutter; t < e.h + gutter; t++) {
+                const int ay = e.y + t;
+                if (ay < 0 || ay >= atlas_h)
+                    continue;
+                const int st = std::clamp(t, 0, e.h - 1);
+                for (int s = -gutter; s < e.w + gutter; s++) {
+                    const int ax = e.x + s;
+                    if (ax < 0 || ax >= atlas_w)
+                        continue;
+                    const int ss = std::clamp(s, 0, e.w - 1);
+                    atlas[(size_t)ay * atlas_w + ax] = face[(size_t)st * e.w + ss];
+                }
+            }
+        }
+
+        logging::print("  style {}: denoising {}x{} atlas ({} face-lightmaps)\n", style, atlas_w, atlas_h,
+            entries.size());
+
+        // one OIDN call over the whole atlas (consistent exposure, cross-face context)
+        ltdenoise::denoise_image(atlas, atlas_w, atlas_h);
+
+        // scatter the denoised RGB back into non-occluded luxels; occluded luxels are left for the
+        // per-face FloodFillTransparent in WriteSingleLightmap to re-fill from the denoised neighbours.
+        for (const entry_t &e : entries) {
+            for (int t = 0; t < e.h; t++) {
+                for (int s = 0; s < e.w; s++) {
+                    const int i = t * e.w + s;
+                    if (e.surf->samples[i].occluded)
+                        continue;
+                    const qvec4f &d = atlas[(size_t)(e.y + t) * atlas_w + (e.x + s)];
+                    e.lm->samples[i].color = {d[0], d[1], d[2]};
+                }
+            }
+        }
+        total_faces += entries.size();
+    }
+
+    logging::print("denoised {} face-lightmap(s) across {} style(s)\n", total_faces, styles.size());
+}
+
 void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
 {
     mbsp_t *bsp = &std::get<mbsp_t>(bspdata->bsp);
@@ -1103,6 +1229,10 @@ void SaveLightmapSurfaces(bspdata_t *bspdata, const fs::path &source)
                 has_color = true;
             }
         });
+
+        // protoanus-tools: denoise the whole lightmap as one atlas now that every face is finished
+        // (scaled/clamped) and still float, before the per-face byte write below.
+        DenoiseLightmapAtlas(bsp);
 
         // auto-generate .lit file if appropriate
         logging::print(logging::flag::STAT, "map uses color: {}\n", static_cast<bool>(has_color));

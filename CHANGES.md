@@ -50,10 +50,18 @@ downsample), so low sample counts come out clean.
   (the `-denoise` setting), `light/CMakeLists.txt` (find/link/define + runtime copy).
 - **Verified:** OIDN device loads (detects the CPU), and a bake with `-denoise` vs without produces a
   different (denoised) lightmap. Degrades gracefully when built/run without OIDN.
-- **Known limitation / future work:** denoise is currently **per-face** and serialized with a mutex; a
-  global lightmap-atlas denoise (reusing `common/bspinfo.cc build_lightmap_atlas`) would give better quality
-  on small faces and run once instead of per-face. Albedo/normal AOV guide buffers (from the texture-average
-  cache + deluxe normals) are also a future refinement.
+- **Whole-lightmap-atlas denoise (replaces the old per-face pass).** Denoising each face in isolation made
+  OIDN re-estimate a different exposure per face and edge-darken each one, tiling into a faint world-aligned
+  grid (a per-cell vignette) under `r_lightmap`. Now, after every face is finished (`SaveLightmapSurfaces`,
+  before the byte write), `DenoiseLightmapAtlas` (`light/write.cc`) packs **every** face's float lightmap —
+  per lightstyle — into ONE big atlas (height-sorted shelf pack, mirroring `common/bspinfo.cc`'s packer) with
+  a replicated-border **gutter** around each face, runs OIDN **once** over the whole atlas (a single
+  consistent exposure + real cross-face context), and scatters the denoised RGB back into
+  `light_surfaces[].lightmapsByStyle[].samples[].color` (non-occluded luxels only; the per-face flood-fill
+  re-fills the rest). The gutter (≥ OIDN's kernel) keeps unrelated faces from bleeding across boundaries.
+  Verified: notnormals' 24 524 faces pack into one 4901×4486 atlas denoised in a single call (no grid,
+  ~350 MB peak, faster than 24k per-face calls). **Future refinement:** albedo/normal AOV guide buffers
+  (per-face texture-average + per-luxel `samples[].normal`) for sharper edge preservation.
 
 ### feat: external mesh occluders — `_light_mesh` (Source `-StaticPropPolys` analogue)
 
@@ -141,14 +149,14 @@ faster) already take effect. No fix required.
 Every optional dependency should follow upstream's `find_package … if(FOUND) add_definitions(-DHAVE_X)`
 pattern (see `light/CMakeLists.txt`), so a missing dep just disables the feature and never breaks the build.
 
-*(OIDN denoising, external mesh occluders, and static-prop per-vertex lighting have all moved to the
-Implemented section above.)*
+*(OIDN denoising (per-face AND whole-atlas), external mesh occluders, and static-prop per-vertex lighting
+have all moved to the Implemented section above.)*
 
-### 1. Global-atlas OIDN denoise + guide AOVs
+### 1. Denoise AOV guide buffers
 
-`-denoise` currently runs OIDN per-face. Packing all face lightmaps into one atlas (reuse
-`common/bspinfo.cc build_lightmap_atlas`) and denoising once would give better small-face quality and let
-albedo (texture-average cache) + normal (deluxe) AOVs guide the filter for sharper edges.
+The whole-atlas denoise works without them, but feeding OIDN albedo (per-face texture-average) + normal
+(per-luxel `samples[].normal`) guide images would let it preserve real material/geometry edges more sharply
+(and reduce reliance on the gutter width).
 
 ### 2. Alpha-tested ("fence") mesh shadows + `.md3`
 
