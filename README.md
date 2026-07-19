@@ -17,8 +17,10 @@ Repo: <https://github.com/ProtoAus/protoanus-tools>
   return a non-zero status on a genuine argument error (while `-help`/`-h`/`-?` still returns 0), so the
   failure is actually detected. See `CHANGES.md`.
 - **`light -denoise` — OIDN lightmap denoising.** An optional Intel Open Image Denoise pass over the baked
-  lightmap, so far fewer samples give clean GI / AO / soft shadows (no denoiser exists upstream). Optional
-  dependency: if OIDN isn't found at build time, `-denoise` is a graceful no-op. See `CHANGES.md`.
+  lightmap, so far fewer samples give clean GI / AO / soft shadows (no denoiser exists upstream). The whole
+  lightmap is denoised as **one atlas** in a single pass (one consistent exposure + cross-face context, so no
+  per-face tiling/grid), not face-by-face. Optional dependency: if OIDN isn't found at build time, `-denoise`
+  is a graceful no-op. See `CHANGES.md`.
 - **External mesh occluders (Source `-StaticPropPolys`).** `light` casts accurate mesh-shaped shadows from
   real prop meshes (`.obj` / `.iqm`) instead of collision-hull/brush-proxy approximations. Point it at your
   existing props with `-propshadowclasses "prop_static prop_detail ..."` (reads each entity's
@@ -31,8 +33,8 @@ Repo: <https://github.com/ProtoAus/protoanus-tools>
   Engine-side consumption (e.g. FTEQW multiplying it over live PBR lighting) is a separate step. See `CHANGES.md`.
 
 **Roadmap** (planned; see `CHANGES.md` for design + status)
-- **Global-atlas OIDN denoise + albedo/normal AOVs** — denoise the whole lightmap at once (better small-face
-  quality, guide buffers) instead of the current per-face pass.
+- **Denoise AOV guide buffers** — feed OIDN albedo/normal guides for sharper edge preservation (the
+  whole-atlas denoise already removes the per-face grid without them, using replicated-border gutters).
 - **Alpha-tested ("fence") mesh shadows** — foliage/grate props need the occluder mesh on the *filter*
   geometry with per-triangle alpha, rather than as an unconditional occluder.
 
@@ -41,8 +43,8 @@ Repo: <https://github.com/ProtoAus/protoanus-tools>
 This fork tracks ericw-tools **2.0.0-alpha** and remains **GPLv2-or-later** (see `COPYING` / `gpl_v3.txt`).
 All original copyrights and credits below are retained; the fork's additions are likewise GPL. Upstream is
 the authority for the tools' core documentation (<https://ericw-tools.readthedocs.io>); build instructions
-are unchanged (`build-windows.ps1` / `build-linux.sh`, CMake + Embree 4 + oneTBB — the roadmap OIDN feature
-adds an optional Open Image Denoise dependency, auto-disabled if absent).
+are unchanged (`build-windows.ps1` / `build-linux.sh`, CMake + Embree 4 + oneTBB — the `light -denoise`
+feature adds an optional Open Image Denoise dependency, auto-disabled if absent).
 
 ---
 
