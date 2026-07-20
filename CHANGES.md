@@ -7,6 +7,26 @@ This file tracks what the fork changes and why, so it can double as release note
 
 ## Implemented
 
+### fix: `light` SIGSEGV on alpha/translucent faces with no pixel data
+
+**Problem.** `light` crashed (segfault, exit `0xC0000005`) during Direct Lighting on maps with alpha-tested
+(`{`) or translucent ("glass") faces — e.g. Source maps converted to Q1 BSP, like `2fort`. notnormals never
+hit it because it has zero such faces.
+
+**Cause.** When a sky/shadow ray hits an alpha/glass face, `Embree_FilterFuncN` samples the face's texture to
+test transparency via `SampleTexture` (`light/trace.cc`). That function guarded `texture == nullptr` and
+`texture->width == 0`, but **not** the pixel buffer itself — a texture can carry dimensions in its metadata
+while its `pixels` vector is empty/undersized (a colour-override / metadata-only texture, or an image that
+failed to load in a converted map). `texture->pixels[width*y + x]` then read past the buffer → SIGSEGV. (This
+is an upstream bug, latent until a map has such a face.)
+
+**Fix.** `SampleTexture` now also rejects a zero `height` and bounds-checks the pixel index against
+`pixels.size()`, returning an empty sample (same as the existing null-texture path) instead of dereferencing
+past the buffer. Such alpha/glass faces then simply cast no coloured shadow rather than crashing the compile.
+
+**Verify:** `light -denoise -bounce 2 ... 2fort.bsp` now completes (was an immediate segfault in Direct
+Lighting). **Files:** `light/trace.cc`.
+
 ### fix: argument errors now exit non-zero (was exit 0)
 
 **Problem.** `qbsp`, `vis`, and `light` printed their usage/help text and exited with status **0** whenever

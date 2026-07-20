@@ -57,7 +57,7 @@ uint32_t clamp_texcoord(float in, uint32_t width)
 qvec4b SampleTexture(
     const mface_t *face, const mtexinfo_t *tex, const img::texture *texture, const mbsp_t *bsp, const qvec3f &point)
 {
-    if (texture == nullptr || !texture->width) {
+    if (texture == nullptr || !texture->width || !texture->height) {
         return {};
     }
 
@@ -66,5 +66,16 @@ qvec4b SampleTexture(
     const uint32_t x = clamp_texcoord(texcoord[0] * texture->width_scale, texture->width);
     const uint32_t y = clamp_texcoord(texcoord[1] * texture->height_scale, texture->height);
 
-    return texture->pixels[(texture->width * y) + x];
+    // protoanus-tools: a texture can carry dimensions in its metadata but have no (or insufficient)
+    // pixel data -- a colour-override / metadata-only texture, or a translucent face in a converted map
+    // (e.g. Source) whose image failed to load. Bounds-check rather than dereferencing past the pixel
+    // buffer; like the null-texture path above, an out-of-range sample returns empty (fully transparent),
+    // so such alpha/glass faces just cast no coloured shadow instead of crashing the light stage
+    // (SIGSEGV lighting maps like 2fort whose `{`/translucent faces reference such textures).
+    const size_t index = static_cast<size_t>(texture->width) * y + x;
+    if (index >= texture->pixels.size()) {
+        return {};
+    }
+
+    return texture->pixels[index];
 }
